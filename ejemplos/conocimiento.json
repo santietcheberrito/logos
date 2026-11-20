@@ -1,0 +1,17 @@
+{
+  "definicion": [
+    {"termino": "Cliente activo", "definicion": "Cliente que hizo al menos una compra en los últimos 90 días y no tiene deuda vencida de más de 30 días.", "categoria": "Ventas", "dueno": "Gerencia comercial"},
+    {"termino": "Pedido urgente", "definicion": "Pedido que el cliente necesita en menos de 24 horas hábiles. Lleva recargo del 10% y solo se acepta si hay stock en el depósito central.", "categoria": "Logística", "dueno": "Jefe de depósito"},
+    {"termino": "Ticket crítico", "definicion": "Reclamo que deja al cliente sin poder operar. Se responde en menos de 1 hora y se escala al responsable de soporte.", "categoria": "Soporte", "dueno": "Responsable de soporte"},
+    {"termino": "Margen bruto", "definicion": "Precio de venta sin IVA menos el costo de reposición del producto, dividido por el precio de venta sin IVA.", "categoria": "Finanzas", "dueno": "Administración"}
+  ],
+  "proceso": [
+    {"nombre": "Devolución de producto", "descripcion": "Cómo se gestiona una devolución pedida por un cliente.", "pasos": ["Verificar que la compra tenga menos de 30 días", "Pedir foto del producto y número de factura", "Crear la nota de crédito en el sistema", "Coordinar el retiro con logística", "Avisar al cliente por WhatsApp cuando se acredita"], "responsable": "Atención al cliente", "restricciones": "No se aceptan devoluciones de productos con el embalaje abierto, salvo falla de fábrica."},
+    {"nombre": "Alta de cliente", "descripcion": "Registro de un cliente nuevo para que pueda comprar en cuenta corriente.", "pasos": ["Pedir CUIT y constancia de inscripción", "Verificar situación en el padrón de AFIP/ARCA", "Cargar los datos en el sistema", "Asignar límite de crédito inicial de $500.000", "Enviar bienvenida con lista de precios"], "responsable": "Administración", "restricciones": "Ningún límite de crédito mayor a $500.000 sin aprobación de gerencia."}
+  ],
+  "regla": [
+    {"nombre": "No prometer fechas de entrega", "aplica_a": "agentes, ventas, soporte", "restriccion": "Nunca confirmar una fecha de entrega exacta. Decir el plazo estándar (48 a 72 h hábiles) y que logística confirma.", "descripcion": "Los plazos dependen del recorrido del camión."},
+    {"nombre": "Descuentos máximos", "aplica_a": "ventas", "restriccion": "El descuento máximo sin aprobación es 8%. Cualquier descuento mayor lo aprueba la gerencia comercial."},
+    {"nombre": "Datos personales", "aplica_a": "todos", "restriccion": "No compartir datos de un cliente (teléfono, deuda, compras) con nadie que no sea el titular de la cuenta."}
+  ]
+}
