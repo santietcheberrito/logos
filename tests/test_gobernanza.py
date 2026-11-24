@@ -82,6 +82,51 @@ def test_documento_borrador_invisible_hasta_aprobar(empresa):
     assert res["cantidad"] == 1 and res["resultados"][0]["titulo"] == "Manual de garantías"
 
 
+def test_umbral_semantico_descarta_fragmentos_lejanos(empresa, monkeypatch):
+    from logos import config
+    _, admin, agente = empresa
+    r = g.cargar_documento(admin, "Política de cambios", "Los cambios se aceptan dentro de los 30 días.", "política")
+    g.aprobar(admin, r["propuesta_id"])
+    consulta = "zzqx plmw"  # sin palabras en común: solo puede entrar por la parte semántica
+    monkeypatch.setattr(config, "SIMILITUD_MAX_DISTANCIA", 2.0)
+    assert l.buscar_contexto(agente, consulta, "documentos")["cantidad"] == 1
+    monkeypatch.setattr(config, "SIMILITUD_MAX_DISTANCIA", 0.0)
+    res = l.buscar_contexto(agente, consulta, "documentos")
+    assert res["cantidad"] == 0 and "aviso" in res
+    # la parte de texto sigue funcionando aunque la semántica no aporte nada
+    assert l.buscar_contexto(agente, "cambios 30 días", "documentos")["cantidad"] == 1
+
+
+def test_texto_no_matchea_solo_por_palabras_genericas(empresa, monkeypatch):
+    from logos import config
+    _, admin, agente = empresa
+    monkeypatch.setattr(config, "SIMILITUD_MAX_DISTANCIA", 0.0)  # que solo cuente la parte de texto
+    r = g.cargar_documento(admin, "SOP de reclamos",
+                           "Cada reclamo tiene un responsable: queda claro quién lo resuelve y cuándo. "
+                           "El reclamo se atiende por WhatsApp.", "SOP")
+    g.aprobar(admin, r["propuesta_id"])
+    for consulta in ("quién ganó el mundial", "¿dónde queda la oficina?", "cómo arreglo la impresora"):
+        res = l.buscar_contexto(agente, consulta)
+        assert res["cantidad"] == 0 and "aviso" in res, consulta
+    for consulta in ("¿cómo atiendo un reclamo?", "reclamos por WhatsApp"):
+        res = l.buscar_contexto(agente, consulta, "documentos")
+        assert res["cantidad"] == 1 and res["resultados"][0]["titulo"] == "SOP de reclamos", consulta
+
+
+def test_umbral_de_rank_de_texto(empresa, monkeypatch):
+    from logos import config
+    _, admin, agente = empresa
+    monkeypatch.setattr(config, "SIMILITUD_MAX_DISTANCIA", 0.0)
+    r = g.cargar_documento(admin, "Garantías", "La garantía de los compresores es de 12 meses.", "manual")
+    g.aprobar(admin, r["propuesta_id"])
+    consulta = "garantía de heladeras importadas"  # coincide 1 palabra de 3
+    monkeypatch.setattr(config, "TEXTO_MIN_RANK", 0.0)
+    assert l.buscar_contexto(agente, consulta, "documentos")["cantidad"] == 1
+    monkeypatch.setattr(config, "TEXTO_MIN_RANK", 0.025)
+    assert l.buscar_contexto(agente, consulta, "documentos")["cantidad"] == 0
+    assert l.buscar_contexto(agente, "garantía compresores", "documentos")["cantidad"] == 1
+
+
 def test_documento_nueva_version_reemplaza(empresa):
     _, admin, agente = empresa
     r1 = g.cargar_documento(admin, "FAQ", "El horario es de 9 a 17.", "FAQ")

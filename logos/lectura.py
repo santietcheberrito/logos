@@ -1,9 +1,11 @@
 """Lectura del conocimiento oficial. Todo filtra por empresa y estado = 'aprobado'."""
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any
 
-from . import db, embeddings
+from . import config, db, embeddings
 from .gobernanza import DatosInvalidos, Identidad, _serializable
 
 SIN_RESULTADO = ("No hay información oficial sobre esto en Logos. "
@@ -11,8 +13,28 @@ SIN_RESULTADO = ("No hay información oficial sobre esto en Logos. "
 
 TIPOS_BUSQUEDA = ("general", "definiciones", "procesos", "reglas", "documentos")
 
-# Consulta de texto en modo OR (las preguntas naturales no tienen todas las palabras)
-_TSQ = "(select nullif(replace(plainto_tsquery('spanish', %(q)s)::text, '&', '|'), '')::tsquery as tsq) q"
+# Consulta de texto en modo OR (las preguntas naturales no tienen todas las palabras). Usa la
+# consulta sin palabras genéricas (%(qt)s): si no queda ninguna, no hay coincidencia de texto.
+_TSQ = "(select nullif(replace(plainto_tsquery('spanish', %(qt)s)::text, '&', '|'), '')::tsquery as tsq) q"
+
+# Palabras de pregunta y de relleno que Postgres no descarta en español (sobre todo con tilde:
+# "cómo", "quién"). Solas no dicen de qué se habla, así que no cuentan para la búsqueda de texto.
+_GENERICAS = frozenset("""
+    que quien quienes como cual cuales cuando cuanto cuanta cuantos cuantas donde adonde porque
+    por para si no es son esta estan estoy hay hace hacen hacer hago puedo puede pueden podes se
+    me mi te tu vos nos les pasa paso queda quedan sirve algo alguien alguno cosa cosas decime dime
+    quiero queres necesito saber sabes tengo tiene tienen hola gracias favor
+""".split())
+
+
+def _sin_tildes(palabra: str) -> str:
+    return unicodedata.normalize("NFKD", palabra).encode("ascii", "ignore").decode()
+
+
+def _consulta_texto(query: str) -> str:
+    """La consulta sin palabras genéricas, para la parte de texto."""
+    palabras = re.findall(r"\w+", query.lower())
+    return " ".join(w for w in palabras if _sin_tildes(w) not in _GENERICAS)
 
 
 def obtener_definicion(ident: Identidad, termino: str) -> dict[str, Any]:
@@ -92,7 +114,8 @@ def buscar_contexto(ident: Identidad, query: str, tipo: str = "general", limite:
     if tipo not in TIPOS_BUSQUEDA:
         raise DatosInvalidos(f"tipo debe ser uno de: {', '.join(TIPOS_BUSQUEDA)}")
     limite = max(1, min(int(limite or 5), 20))
-    p = {"e": ident.empresa_id, "q": query, "k": limite}
+    p = {"e": ident.empresa_id, "q": query, "qt": _consulta_texto(query), "k": limite,
+         "rmin": config.TEXTO_MIN_RANK}
 
     oficiales: list[dict[str, Any]] = []
     fragmentos: list[dict[str, Any]] = []
@@ -145,7 +168,7 @@ def _buscar_tabla(conn, p: dict[str, Any], tipo: str, base_sql: str) -> list[dic
     filas = conn.execute(
         f"""select id, titulo, contenido, version, extra, sim, coalesce(rank, 0) rank
             from ({base_sql}) t
-            where sim > 0.3 or coalesce(rank, 0) > 0
+            where sim > 0.3 or coalesce(rank, 0) >= greatest(%(rmin)s, 1e-6)
             order by greatest(sim, least(coalesce(t.rank, 0) * 10, 1)) desc limit %(k)s""",
         p,
     ).fetchall()
@@ -163,13 +186,14 @@ def _buscar_chunks(conn, p: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
             vector = embeddings.a_pgvector(embeddings.generar([p["q"]])[0])
         except embeddings.EmbeddingsNoDisponibles:
             vector = None
-    p = {**p, "v": vector, "n": max(20, p["k"] * 4)}
+    p = {**p, "v": vector, "n": max(20, p["k"] * 4), "dmax": config.SIMILITUD_MAX_DISTANCIA}
     conn.execute("set local hnsw.ef_search = 100")
     semantica = """
         sem as (
           select c.id, row_number() over (order by c.embedding <=> %(v)s::extensions.vector) r
           from chunks c join documentos d on d.id = c.documento_id
           where c.empresa_id = %(e)s and d.estado = 'aprobado' and c.embedding is not null
+            and c.embedding <=> %(v)s::extensions.vector <= %(dmax)s
           order by c.embedding <=> %(v)s::extensions.vector limit %(n)s
         ),""" if vector else "sem as (select null::uuid id, null::bigint r where false),"
     filas = conn.execute(
@@ -178,6 +202,7 @@ def _buscar_chunks(conn, p: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
           select c.id, row_number() over (order by ts_rank_cd(c.tsv, tsq) desc) r
           from chunks c join documentos d on d.id = c.documento_id, {_TSQ}
           where c.empresa_id = %(e)s and d.estado = 'aprobado' and c.tsv @@ tsq
+            and ts_rank(c.tsv, tsq) >= %(rmin)s
           order by ts_rank_cd(c.tsv, tsq) desc limit %(n)s
         ),
         fusion as (
