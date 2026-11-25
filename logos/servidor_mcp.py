@@ -4,6 +4,9 @@ Uso:
   stdio (Claude Desktop, Cursor):  LOGOS_TOKEN=lgs_agt_... python -m logos.servidor_mcp
   HTTP (Railway / Fly):            python -m logos.servidor_mcp --http --port 4912
                                    y cada agente manda  Authorization: Bearer <token>
+
+En modo HTTP también sirve una API REST en /api/... para agentes que no hablan MCP (mismas
+reglas, mismo token, misma auditoría). Ver `_RUTAS_API` abajo.
 """
 from __future__ import annotations
 
@@ -15,7 +18,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from . import config, gobernanza, lectura
+from . import config, gobernanza, intercambio, lectura
 from .gobernanza import AccesoDenegado, DatosInvalidos, Identidad
 
 INSTRUCCIONES = """\
@@ -57,10 +60,18 @@ def _identidad(ctx: Context) -> Identidad:
 def _ejecutar(ctx: Context, accion: str, params: dict[str, Any], fn, *args: Any) -> dict[str, Any]:
     ident = _identidad(ctx)
     try:
+        return _ejecutar_como(ident, accion, params, fn, *args)
+    except (AccesoDenegado, DatosInvalidos) as e:
+        raise ToolError(str(e)) from e
+
+
+def _ejecutar_como(ident: Identidad, accion: str, params: dict[str, Any], fn, *args: Any) -> dict[str, Any]:
+    """Ejecuta y audita (lo usan el MCP y la API REST). Deja pasar AccesoDenegado/DatosInvalidos."""
+    try:
         resultado = fn(ident, *args)
     except (AccesoDenegado, DatosInvalidos) as e:
         gobernanza.auditar(ident, accion, {"params": params, "error": str(e)})
-        raise ToolError(str(e)) from e
+        raise
     if accion.startswith(("buscar", "obtener")):  # las escrituras ya se auditan en su transacción
         cantidad = resultado.get("cantidad", 1 if (resultado.get("encontrada") or resultado.get("encontrado")) else 0)
         gobernanza.auditar(ident, accion, {"params": params, "resultados": cantidad,
@@ -219,6 +230,110 @@ async def salud(_request):
     from starlette.responses import JSONResponse
 
     return JSONResponse({"ok": True})
+
+
+# ------------------------------------------------------------------ API REST
+#
+#   GET  /api/buscar?q=...&tipo=general&limite=5      (o POST con JSON {"q", "tipo", "limite"})
+#   GET  /api/definicion?termino=...
+#   GET  /api/proceso?nombre=...
+#   GET  /api/reglas?aplica_a=...
+#   POST /api/propuestas        {"tipo", "contenido", "justificacion"}
+#   GET  /api/exportar?formato=json|markdown           (solo admin)
+#
+# Siempre con  Authorization: Bearer <token>.  401 sin token válido, 403 sin permiso,
+# 400 datos inválidos.
+
+async def _parametros(request) -> dict[str, Any]:
+    params: dict[str, Any] = dict(request.query_params)
+    if request.method == "POST":
+        try:
+            cuerpo = await request.json()
+        except ValueError:
+            cuerpo = None
+        if not isinstance(cuerpo, dict):
+            raise DatosInvalidos("El cuerpo tiene que ser un objeto JSON.")
+        params.update(cuerpo)
+    return params
+
+
+def _api(accion: str, armar):
+    """Arma un endpoint: `armar(params)` devuelve (params_auditados, fn, *args)."""
+    from starlette.concurrency import run_in_threadpool
+    from starlette.responses import JSONResponse, PlainTextResponse
+
+    async def endpoint(request):
+        auth = request.headers.get("authorization") or ""
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else None
+        try:
+            ident = await run_in_threadpool(gobernanza.identificar, token)
+        except AccesoDenegado as e:
+            return JSONResponse({"error": str(e)}, status_code=401,
+                                headers={"WWW-Authenticate": "Bearer"})
+        try:
+            params = await _parametros(request)
+            auditados, fn, *args = armar(params)
+            resultado = await run_in_threadpool(_ejecutar_como, ident, accion,
+                                                {**auditados, "canal": "rest"}, fn, *args)
+        except AccesoDenegado as e:
+            return JSONResponse({"error": str(e)}, status_code=403)
+        except DatosInvalidos as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if isinstance(resultado, str):
+            return PlainTextResponse(resultado, media_type="text/markdown; charset=utf-8")
+        return JSONResponse(resultado)
+
+    return endpoint
+
+
+def _entero(valor: Any, defecto: int) -> int:
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        return defecto
+
+
+def _texto_req(params: dict[str, Any], *nombres: str) -> str:
+    for n in nombres:
+        if str(params.get(n) or "").strip():
+            return str(params[n])
+    raise DatosInvalidos(f"Falta el parámetro {nombres[0]}.")
+
+
+def _exportar(ident: Identidad, formato: str) -> dict[str, Any] | str:
+    if formato not in ("json", "markdown"):
+        raise DatosInvalidos("formato debe ser json o markdown")
+    datos = intercambio.exportar(ident)
+    return intercambio.a_markdown(datos) if formato == "markdown" else datos
+
+
+def _armar_buscar(p):
+    q, tipo, limite = _texto_req(p, "q", "query"), p.get("tipo") or "general", _entero(p.get("limite"), 5)
+    return {"query": q, "tipo": tipo, "limite": limite}, lectura.buscar_contexto, q, tipo, limite
+
+
+def _armar_propuesta(p):
+    if not isinstance(p.get("contenido"), dict):
+        raise DatosInvalidos("contenido tiene que ser un objeto.")
+    tipo = _texto_req(p, "tipo")
+    return {"tipo": tipo}, gobernanza.proponer, tipo, p["contenido"], str(p.get("justificacion") or "")
+
+
+_RUTAS_API = [
+    ("/api/buscar", ["GET", "POST"], "buscar_contexto", _armar_buscar),
+    ("/api/definicion", ["GET"], "obtener_definicion",
+     lambda p: ({"termino": (t := _texto_req(p, "termino"))}, lectura.obtener_definicion, t)),
+    ("/api/proceso", ["GET"], "obtener_proceso",
+     lambda p: ({"nombre": (n := _texto_req(p, "nombre"))}, lectura.obtener_proceso, n)),
+    ("/api/reglas", ["GET"], "obtener_reglas",
+     lambda p: ({"aplica_a": (a := _texto_req(p, "aplica_a"))}, lectura.obtener_reglas, a)),
+    ("/api/propuestas", ["POST"], "proponer_actualizacion", _armar_propuesta),
+    ("/api/exportar", ["GET"], "exportar",
+     lambda p: ({"formato": (f := p.get("formato") or "json")}, _exportar, f)),
+]
+
+for _ruta, _metodos, _accion, _armar in _RUTAS_API:
+    mcp.custom_route(_ruta, methods=_metodos, include_in_schema=False)(_api(_accion, _armar))
 
 
 def main() -> None:

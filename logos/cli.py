@@ -5,6 +5,8 @@
   python -m logos.cli cargar ARCHIVO --token TOKEN [--tipo SOP] [--titulo ...]
   python -m logos.cli reindexar                        embeddings de chunks que no los tienen
   python -m logos.cli ejemplos --token TOKEN_ADMIN     carga y aprueba los datos de ejemplo
+  python -m logos.cli exportar --token TOKEN_ADMIN [--formato json|markdown] [--salida ARCHIVO]
+  python -m logos.cli importar ARCHIVO.json --token TOKEN_ADMIN [--pendiente]
 """
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import chunking, db, gobernanza
+from . import chunking, db, gobernanza, intercambio
 
 EJEMPLOS = Path(__file__).resolve().parent.parent / "ejemplos"
 
@@ -59,6 +61,29 @@ def ejemplos(token: str) -> None:
     print(f"Cargados y aprobados {total} elementos de ejemplo.")
 
 
+def exportar(token: str, formato: str, salida: str | None) -> None:
+    datos = intercambio.exportar(gobernanza.identificar(token))
+    texto = (intercambio.a_markdown(datos) if formato == "markdown"
+             else json.dumps(datos, ensure_ascii=False, indent=2) + "\n")
+    if salida:
+        Path(salida).write_text(texto, encoding="utf-8")
+        n = sum(len(datos[t]) for t in ("definicion", "proceso", "regla", "documento"))
+        print(f"Exportados {n} elementos vigentes a {salida}.")
+    else:
+        sys.stdout.write(texto)
+
+
+def importar(archivo: str, token: str, pendiente: bool) -> None:
+    ruta = Path(archivo)
+    try:
+        datos = json.loads(ruta.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise gobernanza.DatosInvalidos(f"No pude leer {archivo} como JSON: {e}") from e
+    r = intercambio.importar(gobernanza.identificar(token), datos, ruta.name, aprobar=not pendiente)
+    print(f"Nuevos: {r['nuevos']} · Actualizados: {r['actualizados']} · Sin cambios: {r['sin_cambios']}"
+          f" · Estado: {r['estado']}")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="logos")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -69,6 +94,10 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--tipo"); s.add_argument("--titulo"); s.add_argument("--fuente")
     sub.add_parser("reindexar")
     s = sub.add_parser("ejemplos"); s.add_argument("--token", required=True)
+    s = sub.add_parser("exportar"); s.add_argument("--token", required=True)
+    s.add_argument("--formato", choices=["json", "markdown"], default="json"); s.add_argument("--salida")
+    s = sub.add_parser("importar"); s.add_argument("archivo"); s.add_argument("--token", required=True)
+    s.add_argument("--pendiente", action="store_true", help="dejar las propuestas para revisar en el panel")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "crear-empresa":
@@ -81,6 +110,10 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Chunks reindexados: {gobernanza.reindexar()}")
         elif a.cmd == "ejemplos":
             ejemplos(a.token)
+        elif a.cmd == "exportar":
+            exportar(a.token, a.formato, a.salida)
+        elif a.cmd == "importar":
+            importar(a.archivo, a.token, a.pendiente)
     except (gobernanza.AccesoDenegado, gobernanza.DatosInvalidos) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

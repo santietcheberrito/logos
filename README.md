@@ -93,6 +93,38 @@ Cada agente manda `Authorization: Bearer <token>`.
 claude mcp add --transport http logos https://<host>/mcp --header "Authorization: Bearer lgs_agt_..."
 ```
 
+**Sin MCP (API REST)** — el mismo servidor HTTP expone `/api/...` para GPT, n8n, Make o agentes
+propios. Mismo token, mismos permisos, y cada consulta se audita igual (marcada `canal: rest`).
+
+| Método | Ruta | Parámetros |
+|---|---|---|
+| GET o POST | `/api/buscar` | `q`, `tipo` (general, definiciones, procesos, reglas, documentos), `limite` |
+| GET | `/api/definicion` | `termino` |
+| GET | `/api/proceso` | `nombre` |
+| GET | `/api/reglas` | `aplica_a` |
+| POST | `/api/propuestas` | JSON `{"tipo", "contenido", "justificacion"}` (queda pendiente) |
+| GET | `/api/exportar` | `formato=json` o `markdown` (solo admin) |
+
+```bash
+curl -H "Authorization: Bearer lgs_agt_..." "https://<host>/api/buscar?q=cuánto+cuesta+el+envío"
+```
+Respuestas: `401` sin token válido, `403` sin permiso, `400` datos inválidos.
+
+## Exportar e importar
+
+```bash
+.venv/bin/python -m logos.cli exportar --token TOKEN_ADMIN --salida respaldo.json
+.venv/bin/python -m logos.cli exportar --token TOKEN_ADMIN --formato markdown --salida conocimiento.md
+.venv/bin/python -m logos.cli importar respaldo.json --token TOKEN_ADMIN [--pendiente]
+```
+- El export trae solo lo vigente (aprobado): definiciones, procesos, reglas y documentos completos.
+  El JSON sirve de respaldo y para pasar el conocimiento a otra empresa o a otra base. El Markdown
+  es para leer o compartir; no se vuelve a importar.
+- El import pasa por la gobernanza: cada cambio entra como propuesta aprobada, con versión nueva y
+  registro en la auditoría. Lo que ya está igual se saltea, así que importar dos veces no duplica.
+  Con `--pendiente` las propuestas quedan para revisar en el panel.
+- Se valida todo el archivo antes de escribir: si algo está mal, no se importa nada.
+
 ## Dashboard
 
 ```bash
